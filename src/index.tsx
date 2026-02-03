@@ -1,9 +1,16 @@
-import { NitroModules } from 'react-native-nitro-modules';
-import type { NitroState } from './NitroState.nitro';
+// Core API
+export { atom, batch, getNitroState, resetNitroState } from './core';
 
-const NitroStateHybridObject =
-  NitroModules.createHybridObject<NitroState>('NitroState');
+// React Hooks
+export { useAtom, useAtomValue, useSetAtom } from './hooks';
 
-export function multiply(a: number, b: number): number {
-  return NitroStateHybridObject.multiply(a, b);
-}
+// Types
+export type {
+  Atom,
+  ReadonlyAtom,
+  SetterFn,
+  Getter,
+  AtomOptions,
+} from './types';
+
+export { isAtom, isReadonlyAtom } from './types';

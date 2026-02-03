@@ -9,8 +9,7 @@
   },
   "autolinking": {
     "NitroState": {
-      "swift": "NitroState",
-      "kotlin": "NitroState"
+      "cpp": "HybridNitroState"
     }
   },
   "ignorePaths": ["node_modules"]

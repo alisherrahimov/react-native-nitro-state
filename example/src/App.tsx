@@ -1,12 +1,21 @@
-import { Text, View, StyleSheet } from 'react-native';
-import { multiply } from 'react-native-nitro-state';
+import { Text, View, StyleSheet, Button } from 'react-native';
+import { atom, useAtom } from 'react-native-nitro-state';
 
-const result = multiply(3, 7);
+const countAtom = atom({ count: 0 });
 
 export default function App() {
+  const [state, setState] = useAtom(countAtom);
+
   return (
     <View style={styles.container}>
-      <Text>Result: {result}</Text>
+      <Text style={styles.text}>Count: {state.count}</Text>
+      <View style={styles.buttonContainer}>
+        <Button
+          title="Increment"
+          onPress={() => setState((prev) => ({ count: prev.count + 1 }))}
+        />
+        <Button title="Reset" onPress={() => setState({ count: 0 })} />
+      </View>
     </View>
   );
 }
@@ -16,5 +25,14 @@ const styles = StyleSheet.create({
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
+    backgroundColor: '#fff',
+  },
+  text: {
+    fontSize: 24,
+    fontWeight: 'bold',
+    marginBottom: 20,
+  },
+  buttonContainer: {
+    gap: 10,
   },
 });
