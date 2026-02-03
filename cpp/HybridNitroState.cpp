@@ -1,34 +1,12 @@
 #include "HybridNitroState.hpp"
 
-namespace nitrostate {
-
-HybridNitroState::HybridNitroState() : HybridObject("NitroState") {}
-
-void HybridNitroState::loadHybridMethods() {
-    // Register methods that will be exposed to JS
-    registerHybridMethod("createAtom", &HybridNitroState::createAtom, this);
-    registerHybridMethod("getAtomValue", &HybridNitroState::getAtomValue, this);
-    registerHybridMethod("setAtomValue", &HybridNitroState::setAtomValue, this);
-    registerHybridMethod("subscribeAtom", &HybridNitroState::subscribeAtom, this);
-    registerHybridMethod("deleteAtom", &HybridNitroState::deleteAtom, this);
-    
-    registerHybridMethod("createComputed", &HybridNitroState::createComputed, this);
-    registerHybridMethod("getComputedValue", &HybridNitroState::getComputedValue, this);
-    registerHybridMethod("deleteComputed", &HybridNitroState::deleteComputed, this);
-    
-    registerHybridMethod("startBatch", &HybridNitroState::startBatch, this);
-    registerHybridMethod("endBatch", &HybridNitroState::endBatch, this);
-    
-    registerHybridMethod("hasAtom", &HybridNitroState::hasAtom, this);
-    registerHybridMethod("getAtomKeys", &HybridNitroState::getAtomKeys, this);
-}
+namespace margelo::nitro::nitrostate {
 
 // ----- Atom Operations -----
 
 void HybridNitroState::createAtom(
-    const std::string& key, 
-    jsi::Runtime& rt, 
-    const jsi::Value& initialValue
+    const std::string& key,
+    const std::shared_ptr<AnyMap>& initialValue
 ) {
     std::lock_guard<std::mutex> lock(mutex_);
     
@@ -36,10 +14,10 @@ void HybridNitroState::createAtom(
         throw std::runtime_error("Atom with key '" + key + "' already exists");
     }
     
-    atoms_[key] = std::make_unique<AtomCore>(rt, initialValue);
+    atoms_[key] = initialValue;
 }
 
-jsi::Value HybridNitroState::getAtomValue(const std::string& key, jsi::Runtime& rt) {
+std::shared_ptr<AnyMap> HybridNitroState::getAtomValue(const std::string& key) {
     std::lock_guard<std::mutex> lock(mutex_);
     
     auto it = atoms_.find(key);
@@ -47,40 +25,12 @@ jsi::Value HybridNitroState::getAtomValue(const std::string& key, jsi::Runtime& 
         throw std::runtime_error("Atom with key '" + key + "' not found");
     }
     
-    return it->second->get(rt);
+    return it->second;
 }
 
 void HybridNitroState::setAtomValue(
-    const std::string& key, 
-    jsi::Runtime& rt, 
-    const jsi::Value& value
-) {
-    AtomCore* atom = nullptr;
-    
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        auto it = atoms_.find(key);
-        if (it == atoms_.end()) {
-            throw std::runtime_error("Atom with key '" + key + "' not found");
-        }
-        atom = it->second.get();
-    }
-    
-    // Check if batching
-    if (BatchManager::instance().isBatching()) {
-        // Store value but defer notification
-        atom->set(rt, value);
-        atom->markClean(); // Don't notify yet
-        BatchManager::instance().queueNotification(atom);
-    } else {
-        atom->set(rt, value);
-    }
-}
-
-jsi::Function HybridNitroState::subscribeAtom(
     const std::string& key,
-    jsi::Runtime& rt,
-    jsi::Function callback
+    const std::shared_ptr<AnyMap>& value
 ) {
     std::lock_guard<std::mutex> lock(mutex_);
     
@@ -89,43 +39,59 @@ jsi::Function HybridNitroState::subscribeAtom(
         throw std::runtime_error("Atom with key '" + key + "' not found");
     }
     
-    // Store callback as shared_ptr for capture
-    auto callbackPtr = std::make_shared<jsi::Function>(std::move(callback));
-    auto* atom = it->second.get();
+    it->second = value;
     
-    auto subscriptionId = atom->subscribe([callbackPtr, &rt]() {
-        callbackPtr->call(rt);
-    });
+    // Notify subscribers
+    if (isBatching_) {
+        pendingNotifications_.push_back(key);
+    } else {
+        auto subIt = subscribers_.find(key);
+        if (subIt != subscribers_.end()) {
+            for (const auto& [id, callback] : subIt->second) {
+                callback();
+            }
+        }
+    }
+}
+
+std::function<void()> HybridNitroState::subscribeAtom(
+    const std::string& key,
+    const std::function<void()>& callback
+) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    
+    auto it = atoms_.find(key);
+    if (it == atoms_.end()) {
+        throw std::runtime_error("Atom with key '" + key + "' not found");
+    }
+    
+    size_t subscriberId = nextSubscriberId_++;
+    subscribers_[key].push_back({subscriberId, callback});
     
     // Return unsubscribe function
-    return jsi::Function::createFromHostFunction(
-        rt,
-        jsi::PropNameID::forAscii(rt, "unsubscribe"),
-        0,
-        [atom, subscriptionId](
-            jsi::Runtime& rt,
-            const jsi::Value& thisVal,
-            const jsi::Value* args,
-            size_t count
-        ) -> jsi::Value {
-            atom->unsubscribe(subscriptionId);
-            return jsi::Value::undefined();
-        }
-    );
+    return [this, key, subscriberId]() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto& subs = subscribers_[key];
+        subs.erase(
+            std::remove_if(subs.begin(), subs.end(),
+                [subscriberId](const auto& pair) { return pair.first == subscriberId; }),
+            subs.end()
+        );
+    };
 }
 
 void HybridNitroState::deleteAtom(const std::string& key) {
     std::lock_guard<std::mutex> lock(mutex_);
     atoms_.erase(key);
+    subscribers_.erase(key);
 }
 
 // ----- Computed Operations -----
 
 void HybridNitroState::createComputed(
     const std::string& key,
-    jsi::Runtime& rt,
     const std::vector<std::string>& dependencies,
-    jsi::Function compute
+    const std::function<std::shared_ptr<Promise<std::shared_ptr<AnyMap>>>()>& compute
 ) {
     std::lock_guard<std::mutex> lock(mutex_);
     
@@ -134,37 +100,46 @@ void HybridNitroState::createComputed(
     }
     
     // Store compute function
-    auto computePtr = std::make_shared<jsi::Function>(std::move(compute));
-    computeFns_[key] = computePtr;
+    computeFns_[key] = compute;
     
-    // Create computed with wrapped function
-    auto computedCore = std::make_unique<ComputedCore>(
-        [computePtr](jsi::Runtime& rt) -> jsi::Value {
-            return computePtr->call(rt);
-        }
-    );
-    
-    // Add dependencies
+    // Subscribe to dependencies to invalidate cache
     for (const auto& depKey : dependencies) {
-        auto it = atoms_.find(depKey);
-        if (it != atoms_.end()) {
-            computedCore->addDependency(it->second.get());
+        if (atoms_.find(depKey) != atoms_.end()) {
+            // When dependency changes, clear cached value
+            subscribeAtom(depKey, [this, key]() {
+                std::lock_guard<std::mutex> lock(mutex_);
+                computed_.erase(key);
+            });
         }
     }
-    
-    computed_[key] = std::move(computedCore);
 }
 
-jsi::Value HybridNitroState::getComputedValue(const std::string& key, jsi::Runtime& rt) {
+std::shared_ptr<AnyMap> HybridNitroState::getComputedValue(const std::string& key) {
     std::lock_guard<std::mutex> lock(mutex_);
     
-    auto it = computed_.find(key);
-    if (it == computed_.end()) {
+    // Check cache first
+    auto cachedIt = computed_.find(key);
+    if (cachedIt != computed_.end()) {
+        return cachedIt->second;
+    }
+    
+    // Compute value
+    auto fnIt = computeFns_.find(key);
+    if (fnIt == computeFns_.end()) {
         throw std::runtime_error("Computed with key '" + key + "' not found");
     }
     
-    return it->second->get(rt);
+    // Call compute function and wait for result
+    auto promise = fnIt->second();
+    auto future = promise->await();
+    auto result = future.get();
+    
+    // Cache result
+    computed_[key] = result;
+    
+    return result;
 }
+
 
 void HybridNitroState::deleteComputed(const std::string& key) {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -175,21 +150,36 @@ void HybridNitroState::deleteComputed(const std::string& key) {
 // ----- Batch Operations -----
 
 void HybridNitroState::startBatch() {
-    BatchManager::instance().startBatch();
+    std::lock_guard<std::mutex> lock(mutex_);
+    isBatching_ = true;
+    pendingNotifications_.clear();
 }
 
 void HybridNitroState::endBatch() {
-    BatchManager::instance().endBatch();
+    std::lock_guard<std::mutex> lock(mutex_);
+    isBatching_ = false;
+    
+    // Notify all pending subscribers
+    for (const auto& key : pendingNotifications_) {
+        auto subIt = subscribers_.find(key);
+        if (subIt != subscribers_.end()) {
+            for (const auto& [id, callback] : subIt->second) {
+                callback();
+            }
+        }
+    }
+    
+    pendingNotifications_.clear();
 }
 
 // ----- Utility -----
 
-bool HybridNitroState::hasAtom(const std::string& key) const {
+bool HybridNitroState::hasAtom(const std::string& key) {
     std::lock_guard<std::mutex> lock(mutex_);
     return atoms_.find(key) != atoms_.end();
 }
 
-std::vector<std::string> HybridNitroState::getAtomKeys() const {
+std::vector<std::string> HybridNitroState::getAtomKeys() {
     std::lock_guard<std::mutex> lock(mutex_);
     std::vector<std::string> keys;
     keys.reserve(atoms_.size());
@@ -199,4 +189,4 @@ std::vector<std::string> HybridNitroState::getAtomKeys() const {
     return keys;
 }
 
-} // namespace nitrostate
+} // namespace margelo::nitro::nitrostate

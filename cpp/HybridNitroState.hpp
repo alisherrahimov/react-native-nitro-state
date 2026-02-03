@@ -1,109 +1,62 @@
 #pragma once
 
-#include <NitroModules/HybridObject.hpp>
+#include "HybridNitroStateSpec.hpp"
+#include <NitroModules/AnyMap.hpp>
 #include <unordered_map>
 #include <memory>
 #include <string>
+#include <mutex>
 #include "AtomCore.hpp"
 #include "ComputedCore.hpp"
 #include "BatchManager.hpp"
 
-namespace nitrostate {
+namespace margelo::nitro::nitrostate {
 
 using namespace margelo::nitro;
 
 /**
  * HybridNitroState - Main JSI binding for the state management library
  * 
- * Exposes atom/computed operations to JavaScript via Nitro Modules.
+ * Implements HybridNitroStateSpec to expose atom/computed operations to JavaScript.
  */
-class HybridNitroState : public HybridObject {
+class HybridNitroState : public HybridNitroStateSpec {
 public:
-    static constexpr auto kJavaDescriptor = "Lcom/margelo/nitro/nitrostate/HybridNitroState;";
-    static constexpr auto kObjCDescriptor = "HybridNitroState";
-
-    explicit HybridNitroState();
+    HybridNitroState() : HybridObject(TAG) {}
     ~HybridNitroState() override = default;
 
     // ----- Atom Operations -----
-    
-    /**
-     * Create a new atom with initial value
-     */
-    void createAtom(const std::string& key, jsi::Runtime& rt, const jsi::Value& initialValue);
-    
-    /**
-     * Get current atom value
-     */
-    jsi::Value getAtomValue(const std::string& key, jsi::Runtime& rt);
-    
-    /**
-     * Set atom value
-     */
-    void setAtomValue(const std::string& key, jsi::Runtime& rt, const jsi::Value& value);
-    
-    /**
-     * Subscribe to atom changes
-     * @return Unsubscribe function
-     */
-    jsi::Function subscribeAtom(
-        const std::string& key, 
-        jsi::Runtime& rt, 
-        jsi::Function callback
-    );
-
-    /**
-     * Delete an atom
-     */
-    void deleteAtom(const std::string& key);
+    void createAtom(const std::string& key, const std::shared_ptr<AnyMap>& initialValue) override;
+    std::shared_ptr<AnyMap> getAtomValue(const std::string& key) override;
+    void setAtomValue(const std::string& key, const std::shared_ptr<AnyMap>& value) override;
+    std::function<void()> subscribeAtom(const std::string& key, const std::function<void()>& callback) override;
+    void deleteAtom(const std::string& key) override;
 
     // ----- Computed Operations -----
-    
-    /**
-     * Create a computed value from dependencies
-     */
     void createComputed(
         const std::string& key,
-        jsi::Runtime& rt,
         const std::vector<std::string>& dependencies,
-        jsi::Function compute
-    );
-    
-    /**
-     * Get computed value
-     */
-    jsi::Value getComputedValue(const std::string& key, jsi::Runtime& rt);
-
-    /**
-     * Delete a computed value
-     */
-    void deleteComputed(const std::string& key);
+        const std::function<std::shared_ptr<Promise<std::shared_ptr<AnyMap>>>()>& compute
+    ) override;
+    std::shared_ptr<AnyMap> getComputedValue(const std::string& key) override;
+    void deleteComputed(const std::string& key) override;
 
     // ----- Batch Operations -----
-    
-    void startBatch();
-    void endBatch();
+    void startBatch() override;
+    void endBatch() override;
 
     // ----- Utility -----
-    
-    /**
-     * Check if an atom exists
-     */
-    bool hasAtom(const std::string& key) const;
-
-    /**
-     * Get all atom keys
-     */
-    std::vector<std::string> getAtomKeys() const;
-
-protected:
-    void loadHybridMethods() override;
+    bool hasAtom(const std::string& key) override;
+    std::vector<std::string> getAtomKeys() override;
 
 private:
-    std::unordered_map<std::string, std::unique_ptr<AtomCore>> atoms_;
-    std::unordered_map<std::string, std::unique_ptr<ComputedCore>> computed_;
-    std::unordered_map<std::string, std::shared_ptr<jsi::Function>> computeFns_;
+    std::unordered_map<std::string, std::shared_ptr<AnyMap>> atoms_;
+    std::unordered_map<std::string, std::shared_ptr<AnyMap>> computed_;
+    std::unordered_map<std::string, std::function<std::shared_ptr<Promise<std::shared_ptr<AnyMap>>>()>> computeFns_;
+    std::unordered_map<std::string, std::vector<std::pair<size_t, std::function<void()>>>> subscribers_;
+    size_t nextSubscriberId_ = 0;
     mutable std::mutex mutex_;
+    bool isBatching_ = false;
+    std::vector<std::string> pendingNotifications_;
 };
 
-} // namespace nitrostate
+} // namespace margelo::nitro::nitrostate
